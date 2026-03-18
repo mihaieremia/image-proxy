@@ -1,0 +1,20 @@
+name = "image-proxy"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-11-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release -- --config profile.release.opt-level='\"z\"' --config profile.release.panic='\"abort\"'"
+
+[vars]
+MAX_WIDTH   = "4096"
+MAX_HEIGHT  = "4096"
+MAX_SIZE_MB = "25"
+CACHE_TTL   = "7776000"
+# Referer header sent to upstream CDNs
+UPSTREAM_REFERER = "https://chartex.com/"
+# Comma-separated list of allowed request origins. Defaults to chartex.com if unset.
+# Example: "https://chartex.com,https://www.chartex.com"
+ALLOWED_ORIGINS = ""
+# Comma-separated list of allowed source image domains. Empty = allow all.
+# Example: "cdn.example.com,images.example.com"
+ALLOWED_DOMAINS = ""
