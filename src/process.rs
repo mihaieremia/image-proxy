@@ -33,6 +33,7 @@ impl OutputFormat {
     /// Rules:
     /// - GIF → always passthrough (decoding destroys animation frames)
     /// - WebP + no resize → passthrough (already optimal)
+    /// - WebP + resize → re-encode as lossless WebP
     /// - JPEG → re-encode as JPEG (lossy with quality control)
     /// - PNG/other → lossless WebP (typically 30-50% smaller)
     pub fn from_content_type(content_type: &str, params: &ResizeParams) -> Self {
@@ -54,7 +55,7 @@ impl OutputFormat {
         match self {
             Self::Jpeg => "image/jpeg",
             Self::WebPLossless => "image/webp",
-            Self::Passthrough => unreachable!("passthrough uses source content-type"),
+            Self::Passthrough => panic!("Passthrough has no content type — this is a bug"),
         }
     }
 }
@@ -77,11 +78,7 @@ impl ProcessResult {
         Self: 'a,
     {
         match self {
-            Self::Processed { format, .. } => match format {
-                OutputFormat::Jpeg => "image/jpeg",
-                OutputFormat::WebPLossless => "image/webp",
-                OutputFormat::Passthrough => unreachable!(),
-            },
+            Self::Processed { format, .. } => format.content_type(),
             Self::Passthrough(_) => source_content_type,
         }
     }
@@ -108,6 +105,14 @@ impl ProcessResult {
 ///
 /// Takes ownership of `bytes` so the source buffer can be freed immediately
 /// after decoding, before the resize allocation happens.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::DecodeFailed`] if the image bytes cannot be decoded
+/// (corrupt data, unsupported sub-format, etc.).
+///
+/// Returns [`ProxyError::EncodeFailed`] if the resized image cannot be
+/// encoded to the target output format (JPEG or lossless WebP).
 pub fn process_image(
     bytes: Vec<u8>,
     params: &ResizeParams,
@@ -116,7 +121,7 @@ pub fn process_image(
     match format {
         OutputFormat::Passthrough => Ok(ProcessResult::Passthrough(bytes)),
         _ => {
-            let img = image::load_from_memory(&bytes).map_err(|_| ProxyError::DecodeFailed)?;
+            let img = image::load_from_memory(&bytes).map_err(|e| ProxyError::DecodeFailed(e.to_string()))?;
             drop(bytes); // Free source bytes before resize allocation
 
             let img = resize(img, params);
@@ -124,7 +129,7 @@ pub fn process_image(
             let encoded = match format {
                 OutputFormat::Jpeg => encode_jpeg(img, params.quality)?,
                 OutputFormat::WebPLossless => encode_webp_lossless(img)?,
-                OutputFormat::Passthrough => unreachable!(),
+                OutputFormat::Passthrough => panic!("Passthrough has no content type — this is a bug"),
             };
 
             Ok(ProcessResult::Processed {
@@ -211,7 +216,7 @@ fn encode_jpeg(img: DynamicImage, quality: u8) -> Result<Vec<u8>, ProxyError> {
     let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
     encoder
         .encode(&data, w, h, ExtendedColorType::Rgb8)
-        .map_err(|_| ProxyError::EncodeFailed)?;
+        .map_err(|e| ProxyError::EncodeFailed(e.to_string()))?;
 
     Ok(buf)
 }
@@ -261,7 +266,7 @@ fn encode_webp_lossless(img: DynamicImage) -> Result<Vec<u8>, ProxyError> {
     let encoder = WebPEncoder::new_lossless(&mut buf);
     encoder
         .encode(&data, w, h, color)
-        .map_err(|_| ProxyError::EncodeFailed)?;
+        .map_err(|e| ProxyError::EncodeFailed(e.to_string()))?;
 
     Ok(buf)
 }

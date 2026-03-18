@@ -27,6 +27,7 @@ impl std::str::FromStr for FitMode {
 
     /// Parse a fit mode from a query string value.
     /// Accepts multiple common formats: `scale-down`, `scaledown`, `scale_down`.
+    /// Note: matching is case-sensitive — `Cover` or `COVER` will be rejected.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "scale-down" | "scaledown" | "scale_down" => Ok(Self::ScaleDown),
@@ -73,21 +74,47 @@ impl ResizeParams {
     /// Extracts `url`, `w`/`width`, `h`/`height`, `q`/`quality`, and `fit`.
     /// Validates dimensions against the provided maximums.
     /// The source `url` parameter must be percent-encoded by the caller.
+    ///
+    /// Quality (`q`/`quality`) is clamped to the 1–100 range: values below 1
+    /// are raised to 1 and values above 100 are lowered to 100. When omitted,
+    /// the default quality of 80 is used.
     pub fn from_url(url: &url::Url, max_width: u32, max_height: u32) -> Result<Self, ProxyError> {
-        let pairs: Vec<(String, String)> = url
-            .query_pairs()
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
+        let mut source_url: Option<String> = None;
+        let mut raw_width: Option<String> = None;
+        let mut raw_height: Option<String> = None;
+        let mut raw_quality: Option<String> = None;
+        let mut raw_fit: Option<String> = None;
 
-        // query_pairs() already percent-decodes — no extra decode needed
-        let source_url = pairs
-            .iter()
-            .find(|(k, _)| k == "url")
-            .map(|(_, v)| v.clone())
-            .ok_or(ProxyError::MissingUrl)?;
+        // Single-pass extraction — no Vec allocation, no repeated linear scans.
+        // query_pairs() already percent-decodes — no extra decode needed.
+        for (k, v) in url.query_pairs() {
+            match k.as_ref() {
+                "url" => source_url = Some(v.into_owned()),
+                "w" | "width" if raw_width.is_none() => raw_width = Some(v.into_owned()),
+                "h" | "height" if raw_height.is_none() => raw_height = Some(v.into_owned()),
+                "q" | "quality" if raw_quality.is_none() => raw_quality = Some(v.into_owned()),
+                "fit" if raw_fit.is_none() => raw_fit = Some(v.into_owned()),
+                _ => {}
+            }
+        }
 
-        let width = parse_optional_u32(&pairs, "w", "width")?;
-        let height = parse_optional_u32(&pairs, "h", "height")?;
+        let source_url = source_url.ok_or(ProxyError::MissingUrl)?;
+
+        let width = raw_width
+            .map(|v| {
+                v.parse::<u32>().map_err(|_| {
+                    ProxyError::InvalidParam("'width' must be a positive integer".to_string())
+                })
+            })
+            .transpose()?;
+
+        let height = raw_height
+            .map(|v| {
+                v.parse::<u32>().map_err(|_| {
+                    ProxyError::InvalidParam("'height' must be a positive integer".to_string())
+                })
+            })
+            .transpose()?;
 
         if let Some(w) = width {
             if w == 0 || w > max_width {
@@ -104,14 +131,18 @@ impl ResizeParams {
             }
         }
 
-        let quality = parse_optional_u32(&pairs, "q", "quality")?
-            .map(|q| q.min(100) as u8)
+        let quality = raw_quality
+            .map(|v| {
+                v.parse::<u32>().map_err(|_| {
+                    ProxyError::InvalidParam("'quality' must be a positive integer".to_string())
+                })
+            })
+            .transpose()?
+            .map(|q| q.clamp(1, 100) as u8)
             .unwrap_or(DEFAULT_QUALITY);
 
-        let fit = pairs
-            .iter()
-            .find(|(k, _)| k == "fit")
-            .map(|(_, v)| v.parse::<FitMode>())
+        let fit = raw_fit
+            .map(|v| v.parse::<FitMode>())
             .transpose()?
             .unwrap_or(FitMode::ScaleDown);
 
@@ -126,6 +157,7 @@ impl ResizeParams {
 
     /// Returns true if no resize dimensions were requested.
     /// Used to decide whether to passthrough WebP/GIF images unchanged.
+    #[must_use]
     pub fn is_passthrough(&self) -> bool {
         self.width.is_none() && self.height.is_none()
     }
@@ -136,17 +168,19 @@ impl ResizeParams {
     /// The source URL is stripped to scheme + host + path only (query params
     /// like auth tokens and signatures are excluded) so rotating signed URLs
     /// for the same image hit a single cache entry.
+    #[must_use]
     pub fn cache_key(&self) -> String {
+        use std::fmt::Write;
+
         let base_url = strip_query(&self.url);
         let mut key = format!("https://image-proxy.internal/v1?url={base_url}");
         if let Some(w) = self.width {
-            key.push_str(&format!("&w={w}"));
+            let _ = write!(key, "&w={w}");
         }
         if let Some(h) = self.height {
-            key.push_str(&format!("&h={h}"));
+            let _ = write!(key, "&h={h}");
         }
-        key.push_str(&format!("&q={}", self.quality));
-        key.push_str(&format!("&fit={}", self.fit));
+        let _ = write!(key, "&q={}&fit={}", self.quality, self.fit);
         key
     }
 }
@@ -162,22 +196,4 @@ fn strip_query(url: &str) -> String {
         }
         Err(_) => url.to_string(),
     }
-}
-
-/// Parse an optional `u32` query parameter, trying both short and long names.
-/// For example, `w` (short) and `width` (long) for the width parameter.
-fn parse_optional_u32(
-    pairs: &[(String, String)],
-    short: &str,
-    long: &str,
-) -> Result<Option<u32>, ProxyError> {
-    pairs
-        .iter()
-        .find(|(k, _)| k == short || k == long)
-        .map(|(_, v)| {
-            v.parse::<u32>().map_err(|_| {
-                ProxyError::InvalidParam(format!("'{long}' must be a positive integer"))
-            })
-        })
-        .transpose()
 }

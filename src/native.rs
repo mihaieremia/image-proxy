@@ -33,13 +33,23 @@ struct AppError(ProxyError);
 /// Server configuration, parsed once from environment variables at startup.
 #[derive(Clone)]
 struct Config {
+    /// Maximum output width in pixels (env `MAX_WIDTH`, default 4096).
     max_width: u32,
+    /// Maximum output height in pixels (env `MAX_HEIGHT`, default 4096).
     max_height: u32,
+    /// Maximum source image size in bytes, derived from `MAX_SIZE_MB` (default 25 MiB).
     max_size_bytes: u64,
+    /// `Cache-Control` max-age / s-maxage value in seconds (env `CACHE_TTL`, default 90 days).
     cache_ttl: u64,
+    /// Optional allowlist of source image domains. `None` means all domains are permitted.
+    /// Parsed from the comma-separated env var `ALLOWED_DOMAINS`.
     allowed_domains: Option<Vec<String>>,
+    /// Origins permitted to call the proxy, checked against `Origin`/`Referer` headers.
+    /// Parsed from the comma-separated env var `ALLOWED_ORIGINS`.
     allowed_origins: Vec<String>,
+    /// `Referer` header value sent to upstream CDNs (env `UPSTREAM_REFERER`).
     referer: String,
+    /// TCP port the server listens on (env `PORT`, default 8080).
     port: u16,
 }
 
@@ -79,7 +89,7 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 fn parse_csv_env(key: &str) -> Option<Vec<String>> {
     std::env::var(key).ok().filter(|s| !s.is_empty()).map(|s| {
         s.split(',')
-            .map(|v| v.trim().to_lowercase())
+            .map(|v| v.trim().trim_start_matches('.').to_lowercase())
             .filter(|v| !v.is_empty())
             .collect()
     })
@@ -91,7 +101,9 @@ fn parse_csv_env(key: &str) -> Option<Vec<String>> {
 
 /// Application state shared across all request handlers.
 struct AppState {
+    /// Server configuration parsed once at startup from environment variables.
     config: Config,
+    /// Shared HTTP client configured with a 30-second timeout and a 5-redirect limit.
     http: reqwest::Client,
 }
 
@@ -121,6 +133,9 @@ impl From<ProxyError> for AppError {
 use image_proxy::security;
 
 /// Validate the request's Origin/Referer against the allowed origins list.
+///
+/// This mirrors [`cors::validate_request_origin`] in the Cloudflare Worker build.
+/// Security policy changes must be applied to both implementations.
 fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<String, ProxyError> {
     if let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) {
         if allowed.iter().any(|a| a == origin) {
@@ -153,7 +168,12 @@ fn validate_content_type(headers: &reqwest::header::HeaderMap) -> Result<String,
     security::validate_media_type(&raw)
 }
 
-/// Main resize handler for GET / and GET /resize.
+/// Main resize handler for GET `/` and GET `/resize`.
+///
+/// Implements the same pipeline as the Cloudflare [`handler::handle_resize_inner`] —
+/// origin check, param parsing, SSRF/domain validation, fetch, content-type
+/// validation, size limit, decode/resize/encode — but **without caching**
+/// (no Cloudflare Cache API layer) and uses `reqwest` instead of `worker::Fetch`.
 async fn handle_resize(
     State(state): State<Arc<AppState>>,
     req: axum::extract::Request,
@@ -164,6 +184,8 @@ async fn handle_resize(
     let matched_origin = validate_origin(req.headers(), &config.allowed_origins)?;
 
     // 2. Parse params from the raw query string (not pre-decoded HashMap)
+    // TODO(PERF-7): A `ResizeParams::from_query_str` method would avoid this
+    // fake URL construction and the extra allocation + parse overhead.
     let raw_query = req.uri().query().unwrap_or("").to_string();
     let fake_url = url::Url::parse(&format!("http://localhost/?{raw_query}"))
         .map_err(|e| ProxyError::InvalidParam(e.to_string()))?;
@@ -194,6 +216,8 @@ async fn handle_resize(
     let content_type = validate_content_type(resp.headers())?;
 
     // 6. Read body + enforce size limit
+    // TODO(PERF-8): `process_image` could accept `bytes::Bytes` directly to
+    // avoid this `.to_vec()` copy.
     let bytes = resp
         .bytes()
         .await
@@ -215,25 +239,22 @@ async fn handle_resize(
     let encoded = result.into_bytes();
 
     // 8. Build response with CORS and cache headers
+    let content_type_val = HeaderValue::from_str(output_content_type)
+        .map_err(|_| ProxyError::InvalidParam("invalid content-type header value".into()))?;
+    let cache_control_val = HeaderValue::from_str(&format!(
+        "public, immutable, no-transform, max-age={}, s-maxage={}",
+        config.cache_ttl, config.cache_ttl
+    ))
+    .map_err(|_| ProxyError::InvalidParam("invalid cache-control header value".into()))?;
+    let origin_val = HeaderValue::from_str(&matched_origin)
+        .map_err(|_| ProxyError::InvalidParam("matched origin contains invalid header characters".into()))?;
+
     let mut response = (
         StatusCode::OK,
         [
-            (
-                CONTENT_TYPE,
-                HeaderValue::from_str(output_content_type).unwrap(),
-            ),
-            (
-                CACHE_CONTROL,
-                HeaderValue::from_str(&format!(
-                    "public, immutable, no-transform, max-age={}, s-maxage={}",
-                    config.cache_ttl, config.cache_ttl
-                ))
-                .unwrap(),
-            ),
-            (
-                ACCESS_CONTROL_ALLOW_ORIGIN,
-                HeaderValue::from_str(&matched_origin).unwrap(),
-            ),
+            (CONTENT_TYPE, content_type_val),
+            (CACHE_CONTROL, cache_control_val),
+            (ACCESS_CONTROL_ALLOW_ORIGIN, origin_val),
             (
                 ACCESS_CONTROL_ALLOW_METHODS,
                 HeaderValue::from_static("GET, HEAD, OPTIONS"),
@@ -248,15 +269,13 @@ async fn handle_resize(
     )
         .into_response();
 
-    // Add custom size headers
-    response.headers_mut().insert(
-        "X-Image-Original-Size",
-        HeaderValue::from_str(&original_size.to_string()).unwrap(),
-    );
-    response.headers_mut().insert(
-        "X-Image-Output-Size",
-        HeaderValue::from_str(&output_size.to_string()).unwrap(),
-    );
+    // Add custom size headers (numeric .to_string() is always valid ASCII)
+    if let Ok(v) = HeaderValue::from_str(&original_size.to_string()) {
+        response.headers_mut().insert("X-Image-Original-Size", v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&output_size.to_string()) {
+        response.headers_mut().insert("X-Image-Output-Size", v);
+    }
 
     Ok(response)
 }
@@ -269,12 +288,14 @@ async fn handle_preflight(State(state): State<Arc<AppState>>, headers: HeaderMap
         .unwrap_or("");
 
     if state.config.allowed_origins.iter().any(|a| a == origin) {
+        let origin_val = HeaderValue::from_str(origin)
+            .unwrap_or_else(|_| HeaderValue::from_static("*"));
         (
             StatusCode::NO_CONTENT,
             [
                 (
                     ACCESS_CONTROL_ALLOW_ORIGIN,
-                    HeaderValue::from_str(origin).unwrap(),
+                    origin_val,
                 ),
                 (
                     ACCESS_CONTROL_ALLOW_METHODS,
@@ -303,6 +324,14 @@ async fn health() -> &'static str {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Server entry point.
+///
+/// Registers three routes:
+/// - `GET /` and `GET /resize` — image resize handler (with OPTIONS preflight).
+/// - `GET /health` — plain-text health check returning `"OK"`.
+///
+/// Builds a shared `reqwest::Client` with a 30-second timeout and a 5-redirect
+/// policy, then binds to `0.0.0.0:{PORT}` (default 8080).
 #[tokio::main]
 async fn main() {
     let config = Config::from_env();

@@ -22,18 +22,22 @@ mod handler;
 #[cfg(feature = "cloudflare")]
 use worker::*;
 
+/// Cloudflare Worker fetch handler entry point.
+///
+/// Parses configuration once from environment variables, then routes the
+/// incoming request to either the CORS preflight handler or the image-resize
+/// pipeline.
 #[cfg(feature = "cloudflare")]
 #[event(fetch, respond_with_errors)]
 async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let config = config::Config::from_env(&env);
-    let allowed_origins = cors::allowed_origins(&env);
 
     if req.method() == Method::Options {
-        return cors::handle_preflight(&req, &allowed_origins);
+        return cors::handle_preflight(&req, &config.allowed_origins);
     }
 
     match req.path().as_str() {
-        "/" | "/resize" => handler::handle_resize(req, ctx, &config, &allowed_origins).await,
+        "/" | "/resize" => handler::handle_resize(req, ctx, &config, &config.allowed_origins).await,
         _ => Response::error("Not Found", 404),
     }
 }

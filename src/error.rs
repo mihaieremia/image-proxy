@@ -7,6 +7,7 @@
 ///
 /// Each variant maps to an HTTP status code via `status_code()`.
 /// The `Display` impl (via `thiserror`) produces the response body text.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
     /// No `url` query parameter was provided.
@@ -42,13 +43,17 @@ pub enum ProxyError {
     FetchFailed(String),
 
     /// The image could not be decoded (corrupt data, unsupported sub-format).
-    #[error("Failed to decode image")]
-    DecodeFailed,
+    #[error("Failed to decode image: {0}")]
+    DecodeFailed(String),
 
     /// The image could not be encoded to the output format.
-    #[error("Failed to encode image")]
-    EncodeFailed,
+    #[error("Failed to encode image: {0}")]
+    EncodeFailed(String),
 }
+
+// TODO: handler.rs constructs `EncodeFailed` directly in multiple places
+// (lines ~208-223). Those call sites must be updated to pass the error
+// message string now that `EncodeFailed(String)` carries a root cause.
 
 impl ProxyError {
     /// Map each error variant to an HTTP status code.
@@ -59,7 +64,9 @@ impl ProxyError {
             Self::InvalidContentType(_) => 415,
             Self::TooLarge(_, _) => 413,
             Self::FetchFailed(_) => 502,
-            Self::DecodeFailed | Self::EncodeFailed => 422,
+            Self::DecodeFailed(_) | Self::EncodeFailed(_) => 422,
+            #[allow(unreachable_patterns)]
+            _ => 500,
         }
     }
 }

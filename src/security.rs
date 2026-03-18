@@ -13,7 +13,8 @@ pub const BROWSER_USER_AGENT: &str =
 
 /// Validate the source URL: parse once, check domain allowlist and SSRF.
 ///
-/// Returns the parsed URL on success (avoids re-parsing later).
+/// Returns the parsed `Url` on success so callers may inspect scheme/host
+/// without re-parsing, though the primary purpose is validation.
 pub fn validate_source_url(
     raw_url: &str,
     allowed_domains: &Option<Vec<String>>,
@@ -33,21 +34,20 @@ pub fn validate_source_url(
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| ProxyError::InvalidParam("source URL has no host".into()))?
-        .to_lowercase();
+        .ok_or_else(|| ProxyError::InvalidParam("source URL has no host".into()))?;
 
     // SSRF: block private/reserved IPs and hostnames
-    validate_not_private(&host)?;
+    validate_not_private(host)?;
 
-    // Domain allowlist
+    // Domain allowlist (case-insensitive comparison without allocating a lowercased copy)
     if let Some(allowed) = allowed_domains {
         if !allowed.iter().any(|d| {
-            host == *d
+            host.eq_ignore_ascii_case(d)
                 || (host.len() > d.len()
-                    && host.ends_with(d.as_str())
+                    && host[host.len() - d.len()..].eq_ignore_ascii_case(d)
                     && host.as_bytes()[host.len() - d.len() - 1] == b'.')
         }) {
-            return Err(ProxyError::DomainNotAllowed(host));
+            return Err(ProxyError::DomainNotAllowed(host.to_lowercase()));
         }
     }
 
@@ -55,6 +55,25 @@ pub fn validate_source_url(
 }
 
 /// Block private/reserved IP ranges and known metadata hostnames.
+///
+/// Blocked IPv4 ranges:
+/// - `127.0.0.0/8` — loopback
+/// - `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` — RFC 1918 private
+/// - `169.254.0.0/16` — link-local
+/// - `100.64.0.0/10` — CGNAT (RFC 6598)
+/// - `255.255.255.255` — broadcast
+/// - `0.0.0.0` — unspecified
+///
+/// Blocked IPv6 ranges:
+/// - `::1` — loopback
+/// - `::` — unspecified
+/// - `fc00::/7` — Unique Local Addresses (ULA)
+/// - `fe80::/10` — link-local
+/// - `::ffff:0:0/96` — IPv4-mapped (checked against IPv4 rules above)
+///
+/// **Caveat**: This function validates the literal host string only. It does
+/// not perform DNS resolution, so it cannot guard against DNS-rebinding
+/// attacks where a hostname resolves to a private IP after validation.
 fn validate_not_private(host: &str) -> Result<(), ProxyError> {
     const BLOCKED_HOSTS: &[&str] = &[
         "localhost",
@@ -63,21 +82,15 @@ fn validate_not_private(host: &str) -> Result<(), ProxyError> {
         "0.0.0.0",
         "metadata.google.internal",
     ];
-    if BLOCKED_HOSTS.contains(&host) {
+    if BLOCKED_HOSTS
+        .iter()
+        .any(|h| host.eq_ignore_ascii_case(h))
+    {
         return Err(ProxyError::SsrfBlocked);
     }
 
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-        if ip.is_loopback()
-            || ip.is_private()
-            || ip.is_link_local()
-            || ip.is_broadcast()
-            || ip.is_unspecified()
-            || (ip.octets()[0] == 169 && ip.octets()[1] == 254)
-            || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
-        {
-            return Err(ProxyError::SsrfBlocked);
-        }
+        check_ipv4_private(ip)?;
     }
 
     if let Ok(ip) = host
@@ -87,8 +100,34 @@ fn validate_not_private(host: &str) -> Result<(), ProxyError> {
         if ip.is_loopback() || ip.is_unspecified() {
             return Err(ProxyError::SsrfBlocked);
         }
+        // ULA fc00::/7
+        if ip.segments()[0] & 0xfe00 == 0xfc00 {
+            return Err(ProxyError::SsrfBlocked);
+        }
+        // Link-local fe80::/10
+        if ip.segments()[0] & 0xffc0 == 0xfe80 {
+            return Err(ProxyError::SsrfBlocked);
+        }
+        // IPv4-mapped ::ffff:x.x.x.x — apply IPv4 rules
+        if let Some(mapped) = ip.to_ipv4_mapped() {
+            check_ipv4_private(mapped)?;
+        }
     }
 
+    Ok(())
+}
+
+/// Check an IPv4 address against all blocked private/reserved ranges.
+fn check_ipv4_private(ip: std::net::Ipv4Addr) -> Result<(), ProxyError> {
+    if ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_unspecified()
+        || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+    {
+        return Err(ProxyError::SsrfBlocked);
+    }
     Ok(())
 }
 

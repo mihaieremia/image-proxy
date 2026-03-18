@@ -7,33 +7,9 @@ use worker::{Headers, Request, Response};
 
 use crate::error::ProxyError;
 
-/// Default allowed origins when `ALLOWED_ORIGINS` env var is not set.
-const DEFAULT_ALLOWED_ORIGINS: &[&str] = &["https://chartex.com", "https://www.chartex.com"];
-
 /// Check if a given origin string exactly matches any entry in the allowlist.
 fn is_origin_allowed(origin: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|a| a == origin)
-}
-
-/// Parse the `ALLOWED_ORIGINS` env var as a comma-separated list.
-/// Falls back to `DEFAULT_ALLOWED_ORIGINS` if unset or empty.
-pub fn allowed_origins(env: &worker::Env) -> Vec<String> {
-    env.var("ALLOWED_ORIGINS")
-        .ok()
-        .map(|v| v.to_string())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.split(',')
-                .map(|o| o.trim().to_string())
-                .filter(|o| !o.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            DEFAULT_ALLOWED_ORIGINS
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        })
 }
 
 /// Validate that the request's Origin or Referer matches an allowed origin.
@@ -75,7 +51,10 @@ pub fn validate_request_origin(req: &Request, allowed: &[String]) -> Result<Stri
 }
 
 /// Build CORS response headers for the given matched origin.
-/// Uses the specific origin (not `*`) with `Vary: Origin` for correct CDN behavior.
+/// Sets `Access-Control-Allow-Origin` to the provided `origin` value — this is
+/// normally a specific origin from the allowlist, but may be `*` when no
+/// `Origin` or `Referer` header is present on the request. `Vary: Origin` is
+/// always included for correct CDN behavior.
 pub fn cors_headers_for(origin: &str) -> Result<Headers, worker::Error> {
     let headers = Headers::new();
     headers.set("Access-Control-Allow-Origin", origin)?;

@@ -12,6 +12,8 @@ const DEFAULT_MAX_HEIGHT: u32 = 4096;
 const DEFAULT_MAX_SIZE_MB: u64 = 25;
 /// Default cache TTL in seconds (90 days).
 const DEFAULT_CACHE_TTL: u64 = 7_776_000;
+/// Default allowed origins when `ALLOWED_ORIGINS` env var is not set.
+const DEFAULT_ALLOWED_ORIGINS: &[&str] = &["https://chartex.com", "https://www.chartex.com"];
 
 /// All configurable limits and settings, parsed once per request from env vars.
 ///
@@ -29,6 +31,8 @@ pub struct Config {
     pub allowed_domains: Option<Vec<String>>,
     /// Referer header value sent to upstream CDNs.
     pub referer: String,
+    /// Parsed list of origins allowed to call the proxy (from `ALLOWED_ORIGINS`).
+    pub allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -50,6 +54,7 @@ impl Config {
             cache_ttl: env_parse(env, "CACHE_TTL", DEFAULT_CACHE_TTL),
             allowed_domains: parse_domain_list(env),
             referer,
+            allowed_origins: parse_origin_list(env),
         }
     }
 }
@@ -62,6 +67,27 @@ fn env_parse<T: std::str::FromStr>(env: &Env, key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// Parse the `ALLOWED_ORIGINS` env var as a comma-separated list.
+/// Falls back to `DEFAULT_ALLOWED_ORIGINS` if unset or empty.
+fn parse_origin_list(env: &Env) -> Vec<String> {
+    env.var("ALLOWED_ORIGINS")
+        .ok()
+        .map(|v| v.to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            DEFAULT_ALLOWED_ORIGINS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        })
+}
+
 /// Parse the `ALLOWED_DOMAINS` env var as a comma-separated, lowercased list.
 /// Returns `None` if unset or empty (meaning all domains are allowed).
 fn parse_domain_list(env: &Env) -> Option<Vec<String>> {
@@ -71,7 +97,7 @@ fn parse_domain_list(env: &Env) -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(|s| {
             s.split(',')
-                .map(|d| d.trim().to_lowercase())
+                .map(|d| d.trim().trim_start_matches('.').to_lowercase())
                 .filter(|d| !d.is_empty())
                 .collect()
         })
