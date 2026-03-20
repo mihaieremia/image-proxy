@@ -9,7 +9,9 @@ const DEFAULT_MAX_WIDTH: u32 = 4096;
 /// Default maximum output height in pixels.
 const DEFAULT_MAX_HEIGHT: u32 = 4096;
 /// Default maximum source image size in megabytes.
-const DEFAULT_MAX_SIZE_MB: u64 = 25;
+/// Lowered from 25 to 10 — a 25MB JPEG can decompress to >100MB raw pixels,
+/// exceeding the 128MB WASM memory limit.
+const DEFAULT_MAX_SIZE_MB: u64 = 10;
 /// Default cache TTL in seconds (90 days).
 const DEFAULT_CACHE_TTL: u64 = 7_776_000;
 /// Default allowed origins when `ALLOWED_ORIGINS` env var is not set.

@@ -159,7 +159,7 @@ fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> Result<String, Pr
 }
 
 /// Validate content-type from upstream reqwest response headers.
-fn validate_content_type(headers: &reqwest::header::HeaderMap) -> Result<String, ProxyError> {
+fn validate_content_type(headers: &reqwest::header::HeaderMap) -> Result<&'static str, ProxyError> {
     let raw = headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -232,9 +232,9 @@ async fn handle_resize(
     let original_size = bytes.len();
 
     // 7. Process image
-    let format = OutputFormat::from_content_type(&content_type, &params);
+    let format = OutputFormat::from_content_type(content_type, &params);
     let result = process::process_image(bytes, &params, format)?;
-    let output_content_type = result.output_content_type(&content_type);
+    let output_content_type = result.output_content_type(content_type);
     let output_size = result.len();
     let encoded = result.into_bytes();
 

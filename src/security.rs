@@ -139,11 +139,12 @@ pub fn extract_media_type(content_type: &str) -> &str {
 
 /// Validate a content-type string against the allowed list.
 /// Takes an already-lowercased raw content-type value.
-pub fn validate_media_type(raw_content_type: &str) -> Result<String, ProxyError> {
+/// Returns the matched `&'static str` from [`ALLOWED_CONTENT_TYPES`] — no allocation.
+pub fn validate_media_type(raw_content_type: &str) -> Result<&'static str, ProxyError> {
     let media_type = extract_media_type(raw_content_type);
-    if ALLOWED_CONTENT_TYPES.contains(&media_type) {
-        Ok(media_type.to_string())
-    } else {
-        Err(ProxyError::InvalidContentType(raw_content_type.to_string()))
-    }
+    ALLOWED_CONTENT_TYPES
+        .iter()
+        .find(|&&ct| ct == media_type)
+        .copied()
+        .ok_or_else(|| ProxyError::InvalidContentType(raw_content_type.to_string()))
 }

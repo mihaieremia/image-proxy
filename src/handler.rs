@@ -69,13 +69,19 @@ fn set_browser_headers(headers: &mut Headers, referer: &str) {
 /// * [`ProxyError::FetchFailed`] — if the header cannot be read from the response.
 /// * [`ProxyError::InvalidContentType`] — if the media type is not in the
 ///   allowlist (delegated to [`security::validate_media_type`]).
-fn validate_content_type(headers: &Headers) -> Result<String, ProxyError> {
+fn validate_content_type(headers: &Headers) -> Result<&'static str, ProxyError> {
     let raw = headers
         .get("content-type")
         .map_err(|e| ProxyError::FetchFailed(e.to_string()))?
-        .unwrap_or_default()
-        .to_lowercase();
-    security::validate_media_type(&raw)
+        .unwrap_or_default();
+    // Fast path: most servers already send lowercase content-type.
+    // Only allocate a lowercased copy if we find uppercase chars.
+    if raw.bytes().any(|b| b.is_ascii_uppercase()) {
+        let lower = raw.to_lowercase();
+        security::validate_media_type(&lower)
+    } else {
+        security::validate_media_type(&raw)
+    }
 }
 
 /// Inner handler — returns `ProxyError` (converted to HTTP by the outer handler).
@@ -177,15 +183,17 @@ async fn handle_resize_inner(
     let original_size = bytes.len();
 
     // 7. Process image
-    let format = OutputFormat::from_content_type(&content_type, &params);
+    let format = OutputFormat::from_content_type(content_type, &params);
     let result = process::process_image(bytes, &params, format)?;
-    let output_content_type = result.output_content_type(&content_type);
+    let output_content_type = result.output_content_type(content_type);
     let output_size = result.len();
 
     // 8. Build response + cache asynchronously
+    // Use Response::cloned() to avoid duplicating the byte buffer in Rust.
+    // The clone happens on the JS side (structured clone), which is cheaper
+    // than a Rust Vec::clone() because it avoids a second WASM heap allocation.
     let encoded = result.into_bytes();
-    let cache_bytes = encoded.clone();
-    let response = build_response(
+    let mut response = build_response(
         encoded,
         original_size,
         output_size,
@@ -193,14 +201,10 @@ async fn handle_resize_inner(
         &matched_origin,
         output_content_type,
     )?;
-    let cache_resp = build_response(
-        cache_bytes,
-        original_size,
-        output_size,
-        config.cache_ttl,
-        &matched_origin,
-        output_content_type,
-    )?;
+
+    let cache_resp = response
+        .cloned()
+        .map_err(|e| ProxyError::EncodeFailed(e.to_string()))?;
 
     ctx.wait_until(async move {
         let _ = cache.put(&cache_key, cache_resp).await;
@@ -233,9 +237,6 @@ fn build_response(
     headers
         .set("Content-Type", content_type)
         .map_err(|e| ProxyError::EncodeFailed(e.to_string()))?;
-    // PERF: This format! runs per call, but build_response is only invoked on cache
-    // misses (twice: once for the live response, once for the cache copy), so the
-    // allocation cost is negligible compared to the image processing work.
     headers
         .set(
             "Cache-Control",

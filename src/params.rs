@@ -80,41 +80,40 @@ impl ResizeParams {
     /// the default quality of 80 is used.
     pub fn from_url(url: &url::Url, max_width: u32, max_height: u32) -> Result<Self, ProxyError> {
         let mut source_url: Option<String> = None;
-        let mut raw_width: Option<String> = None;
-        let mut raw_height: Option<String> = None;
-        let mut raw_quality: Option<String> = None;
-        let mut raw_fit: Option<String> = None;
+        let mut width: Option<u32> = None;
+        let mut height: Option<u32> = None;
+        let mut quality: Option<u8> = None;
+        let mut fit: Option<FitMode> = None;
 
-        // Single-pass extraction — no Vec allocation, no repeated linear scans.
-        // query_pairs() already percent-decodes — no extra decode needed.
+        // Single-pass: parse values inline from Cow<str> — avoids intermediate
+        // String allocations for numeric params (w, h, q are typically 1-4 chars).
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
-                "url" => source_url = Some(v.into_owned()),
-                "w" | "width" if raw_width.is_none() => raw_width = Some(v.into_owned()),
-                "h" | "height" if raw_height.is_none() => raw_height = Some(v.into_owned()),
-                "q" | "quality" if raw_quality.is_none() => raw_quality = Some(v.into_owned()),
-                "fit" if raw_fit.is_none() => raw_fit = Some(v.into_owned()),
+                "url" if source_url.is_none() => source_url = Some(v.into_owned()),
+                "w" | "width" if width.is_none() => {
+                    width = Some(v.parse::<u32>().map_err(|_| {
+                        ProxyError::InvalidParam("'width' must be a positive integer".into())
+                    })?);
+                }
+                "h" | "height" if height.is_none() => {
+                    height = Some(v.parse::<u32>().map_err(|_| {
+                        ProxyError::InvalidParam("'height' must be a positive integer".into())
+                    })?);
+                }
+                "q" | "quality" if quality.is_none() => {
+                    let q = v.parse::<u32>().map_err(|_| {
+                        ProxyError::InvalidParam("'quality' must be a positive integer".into())
+                    })?;
+                    quality = Some(q.clamp(1, 100) as u8);
+                }
+                "fit" if fit.is_none() => {
+                    fit = Some(v.parse::<FitMode>()?);
+                }
                 _ => {}
             }
         }
 
         let source_url = source_url.ok_or(ProxyError::MissingUrl)?;
-
-        let width = raw_width
-            .map(|v| {
-                v.parse::<u32>().map_err(|_| {
-                    ProxyError::InvalidParam("'width' must be a positive integer".to_string())
-                })
-            })
-            .transpose()?;
-
-        let height = raw_height
-            .map(|v| {
-                v.parse::<u32>().map_err(|_| {
-                    ProxyError::InvalidParam("'height' must be a positive integer".to_string())
-                })
-            })
-            .transpose()?;
 
         if let Some(w) = width {
             if w == 0 || w > max_width {
@@ -131,27 +130,12 @@ impl ResizeParams {
             }
         }
 
-        let quality = raw_quality
-            .map(|v| {
-                v.parse::<u32>().map_err(|_| {
-                    ProxyError::InvalidParam("'quality' must be a positive integer".to_string())
-                })
-            })
-            .transpose()?
-            .map(|q| q.clamp(1, 100) as u8)
-            .unwrap_or(DEFAULT_QUALITY);
-
-        let fit = raw_fit
-            .map(|v| v.parse::<FitMode>())
-            .transpose()?
-            .unwrap_or(FitMode::ScaleDown);
-
         Ok(Self {
             url: source_url,
             width,
             height,
-            quality,
-            fit,
+            quality: quality.unwrap_or(DEFAULT_QUALITY),
+            fit: fit.unwrap_or(FitMode::ScaleDown),
         })
     }
 

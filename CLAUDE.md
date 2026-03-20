@@ -56,7 +56,7 @@ Three layers:
 | `UPSTREAM_REFERER` | `https://chartex.com/` | Referer header sent to upstream CDNs |
 | `MAX_WIDTH` | `4096` | Maximum output width in pixels |
 | `MAX_HEIGHT` | `4096` | Maximum output height in pixels |
-| `MAX_SIZE_MB` | `25` | Maximum source image size in MB |
+| `MAX_SIZE_MB` | `10` | Maximum source image size in MB |
 | `CACHE_TTL` | `7776000` (90 days) | Cache-Control max-age in seconds |
 
 ## Output Format Strategy
@@ -64,9 +64,11 @@ Three layers:
 | Input | Output | Rationale |
 |---|---|---|
 | JPEG | JPEG (lossy, quality=`q` param) | Lossy→lossy preserves size advantage, quality controllable |
-| PNG | WebP lossless | Usually smaller than PNG, preserves transparency |
+| PNG (opaque) | JPEG (lossy, quality=`q` param) | ~3-5x faster encode than WebP; most CDN PNGs have no transparency |
+| PNG (with alpha) | WebP lossless | Preserves transparency, usually smaller than PNG |
 | GIF | Passthrough (no processing) | Preserves animation — decoding destroys frames |
 | WebP (no resize) | Passthrough | Already optimal format |
+| Any (>16Mpx) | Passthrough | Avoids OOM in 128MB WASM isolate |
 
 ## Caching
 

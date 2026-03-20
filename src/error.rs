@@ -51,9 +51,6 @@ pub enum ProxyError {
     EncodeFailed(String),
 }
 
-// TODO: handler.rs constructs `EncodeFailed` directly in multiple places
-// (lines ~208-223). Those call sites must be updated to pass the error
-// message string now that `EncodeFailed(String)` carries a root cause.
 
 impl ProxyError {
     /// Map each error variant to an HTTP status code.
